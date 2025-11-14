@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Hand Gesture Motor Control</title>
+  <style>
+    body { font-family: Arial; text-align: center; background: #f0f0f0; }
+    video, canvas { width: 640px; height: 480px; border: 2px solid #333; margin: 10px; }
+    #status { font-size: 24px; color: #00f; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <h1>Hand Gesture → ESP32 Motor Control</h1>
+  <video class="input_video" autoplay playsinline></video>
+  <canvas class="output_canvas"></canvas>
+  <p id="status">Loading... (Show your hand)</p>
+
+  <script type="module">
+    const video = document.querySelector('.input_video');
+    const canvas = document.querySelector('.output_canvas');
+    const ctx = canvas.getContext('2d');
+    const status = document.getElementById('status');
+    canvas.width = 640; canvas.height = 480;
+
+    let socket;
+    const ESP_IP = '192.168.4.1';  // CHANGE TO YOUR ESP32's IP!
+    function connectWS() {
+      socket = new WebSocket(`ws://${ESP_IP}:81`);
+      socket.onopen = () => status.textContent += ' | WS Connected';
+      socket.onclose = () => { status.textContent += ' | WS Disconnected - Reconnecting...'; setTimeout(connectWS, 2000); };
+      socket.onerror = (err) => console.error('WS Error:', err);
+    }
+    connectWS();
+
+    function send(cmd) {
+      if (socket && socket.readyState === WebSocket.OPEN) socket.send(cmd);
+    }
+
+    // Improved finger counter (works for right hand facing camera; flip logic if needed)
+    function countRaisedFingers(landmarks, handedness) {
+      if (!landmarks) return -1;
+      const isLeft = handedness === 'Left';
+      const tips = [4, 8, 12, 16, 20];  // Thumb, Index, Middle, Ring, Pinky
+      let count = 0;
+      // Thumb: compare x to wrist
+      if ((isLeft && landmarks[4].x < landmarks[0].x) || (!isLeft && landmarks[4].x > landmarks[0].x)) count++;
+      // Other fingers: tip above PIP joint
+      for (let i = 1; i < 5; i++) {
+        if (landmarks[tips[i]].y < landmarks[tips[i] - 2].y) count++;
+      }
+      return count;
+    }
+
+    const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+    hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+    hands.onResults((results) => {
+      ctx.save();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+      if (results.multiHandLandmarks && results.multiHandLandmarks[0]) {
+        const lm = results.multiHandLandmarks[0];
+        const handedness = results.multiHandedness[0].label;
+        drawConnectors(ctx, lm, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 4});
+        drawLandmarks(ctx, lm, {color: '#FF0000', lineWidth: 2});
+
+        const fingers = countRaisedFingers(lm, handedness);
+        let cmd = 'stop';
+        if (fingers === 1) cmd = 'forward';
+        else if (fingers === 2) cmd = 'left';
+        else if (fingers === 3) cmd = 'right';
+        else if (fingers === 5) cmd = 'backward';
+        // Add 0 for fist/stop
+
+        status.textContent = `Gesture: ${cmd} (${fingers} fingers)`;
+        send(cmd);
+      } else {
+        status.textContent = 'No hand detected';
+        send('stop');
+      }
+      ctx.restore();
+    });
+
+    const camera = new Camera(video, {
+      onFrame: async () => await hands.send({image: video}),
+      width: 640, height: 480
+    });
+    camera.start();
+  </script>
+</body>
+</html>
